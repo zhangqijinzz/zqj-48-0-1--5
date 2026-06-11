@@ -1,6 +1,8 @@
 import { useRef, useEffect, useState } from 'react';
 import type { CanvasElement } from '@/types';
 import { hexToRgba } from '@/lib/colorUtils';
+import { useCanvasStore } from '@/store/canvasStore';
+import { computeSnap } from '@/lib/guides';
 
 interface CanvasElementRendererProps {
   element: CanvasElement;
@@ -26,6 +28,7 @@ export default function CanvasElementRenderer({
   const [dragStart, setDragStart] = useState({ x: 0, y: 0, elemX: 0, elemY: 0 });
   const [resizeStart, setResizeStart] = useState({ startX: 0, startY: 0, startW: 0, startH: 0 });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { elements, canvasWidth, canvasHeight, setGuides, clearGuides } = useCanvasStore();
 
   useEffect(() => {
     if (isEditing && textareaRef.current) {
@@ -37,9 +40,20 @@ export default function CanvasElementRenderer({
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (isDragging) {
-        const dx = e.clientX - dragStart.x;
-        const dy = e.clientY - dragStart.y;
-        onMove(dragStart.elemX + dx, dragStart.elemY + dy);
+        const rawDx = e.clientX - dragStart.x;
+        const rawDy = e.clientY - dragStart.y;
+        const snapResult = computeSnap(
+          [element],
+          elements,
+          canvasWidth,
+          canvasHeight,
+          rawDx,
+          rawDy
+        );
+        const newX = dragStart.elemX + snapResult.snappedX;
+        const newY = dragStart.elemY + snapResult.snappedY;
+        onMove(newX, newY);
+        setGuides(snapResult.guides);
       }
       if (isResizing) {
         const dx = e.clientX - resizeStart.startX;
@@ -53,6 +67,7 @@ export default function CanvasElementRenderer({
     const handleMouseUp = () => {
       setIsDragging(false);
       setIsResizing(false);
+      clearGuides();
     };
 
     if (isDragging || isResizing) {
@@ -64,7 +79,7 @@ export default function CanvasElementRenderer({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, isResizing, dragStart, resizeStart, onMove, onResize]);
+  }, [isDragging, isResizing, dragStart, resizeStart, onMove, onResize, element, elements, canvasWidth, canvasHeight, setGuides, clearGuides]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;

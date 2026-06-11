@@ -14,6 +14,7 @@ const Canvas = forwardRef<HTMLDivElement, CanvasProps>(({ className = '' }, ref)
     canvasWidth,
     canvasHeight,
     currentTheme,
+    activeGuides,
     selectElement,
     moveElement,
     resizeElement,
@@ -111,6 +112,43 @@ const Canvas = forwardRef<HTMLDivElement, CanvasProps>(({ className = '' }, ref)
             onUpdate={(updates) => updateElement(element.id, updates)}
           />
         ))}
+
+        <svg
+          className="pointer-events-none absolute inset-0"
+          width={canvasWidth}
+          height={canvasHeight}
+          style={{ zIndex: 99999 }}
+        >
+          {activeGuides.map((guide, idx) => {
+            const key = `${guide.type}-${idx}`;
+            if (guide.type === 'vertical') {
+              return (
+                <line
+                  key={key}
+                  x1={guide.position}
+                  y1={guide.start}
+                  x2={guide.position}
+                  y2={guide.end}
+                  stroke={guide.color || '#f43f5e'}
+                  strokeWidth={1}
+                  strokeDasharray="4 3"
+                />
+              );
+            }
+            return (
+              <line
+                key={key}
+                x1={guide.start}
+                y1={guide.position}
+                x2={guide.end}
+                y2={guide.position}
+                stroke={guide.color || '#f43f5e'}
+                strokeWidth={1}
+                strokeDasharray="4 3"
+              />
+            );
+          })}
+        </svg>
 
         {elements.length === 0 && (
           <div className="pointer-events-none flex h-full w-full flex-col items-center justify-center text-center">

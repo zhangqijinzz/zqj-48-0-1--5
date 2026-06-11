@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { CanvasElement, Theme, ColorPalette, ThemeId } from '@/types';
 import { themes } from '@/data/themes';
 import { generateColorPalette } from '@/lib/colorUtils';
+import type { GuideLine } from '@/lib/guides';
 
 interface CanvasState {
   elements: CanvasElement[];
@@ -13,6 +14,7 @@ interface CanvasState {
   canvasWidth: number;
   canvasHeight: number;
   nextZIndex: number;
+  activeGuides: GuideLine[];
 
   addElement: (element: Omit<CanvasElement, 'id' | 'zIndex'>) => void;
   updateElement: (id: string, updates: Partial<CanvasElement>) => void;
@@ -24,6 +26,8 @@ interface CanvasState {
   sendToBack: (id: string) => void;
   duplicateElement: (id: string) => void;
   clearCanvas: () => void;
+  setGuides: (guides: GuideLine[]) => void;
+  clearGuides: () => void;
 
   setTheme: (themeId: ThemeId) => void;
   setPrimaryColor: (color: string) => void;
@@ -44,6 +48,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   canvasWidth: 800,
   canvasHeight: 1000,
   nextZIndex: 1,
+  activeGuides: [],
 
   addElement: (elementData) => {
     const state = get();
@@ -135,7 +140,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
 
   clearCanvas: () => {
-    set({ elements: [], selectedElementId: null, nextZIndex: 1 });
+    set({ elements: [], selectedElementId: null, nextZIndex: 1, activeGuides: [] });
+  },
+
+  setGuides: (guides) => {
+    set({ activeGuides: guides });
+  },
+
+  clearGuides: () => {
+    set({ activeGuides: [] });
   },
 
   setTheme: (themeId) => {
