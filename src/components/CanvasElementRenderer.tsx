@@ -1,8 +1,8 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import type { CanvasElement } from '@/types';
 import { hexToRgba } from '@/lib/colorUtils';
 import { useCanvasStore } from '@/store/canvasStore';
-import { computeSnap } from '@/lib/guides';
+import { computeSnapFromPosition, createInitialSnapContext, type SnapContext } from '@/lib/guides';
 
 interface CanvasElementRendererProps {
   element: CanvasElement;
@@ -21,14 +21,40 @@ export default function CanvasElementRenderer({
   onResize,
   onUpdate,
 }: CanvasElementRendererProps) {
-  const elementRef = useRef<HTMLDivElement>(null);
+  const divRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0, elemX: 0, elemY: 0 });
-  const [resizeStart, setResizeStart] = useState({ startX: 0, startY: 0, startW: 0, startH: 0 });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { elements, canvasWidth, canvasHeight, setGuides, clearGuides } = useCanvasStore();
+
+  const dragStateRef = useRef({
+    active: false,
+    startMouseX: 0,
+    startMouseY: 0,
+    startElemX: 0,
+    startElemY: 0,
+    snapCtx: createInitialSnapContext(),
+  });
+
+  const resizeStateRef = useRef({
+    active: false,
+    startMouseX: 0,
+    startMouseY: 0,
+    startW: 0,
+    startH: 0,
+  });
+
+  const storeRef = useRef(useCanvasStore.getState());
+  useEffect(() => {
+    storeRef.current = useCanvasStore.getState();
+  });
+
+  const onMoveRef = useRef(onMove);
+  onMoveRef.current = onMove;
+  const onResizeRef = useRef(onResize);
+  onResizeRef.current = onResize;
+  const clearGuidesRef = useRef(useCanvasStore.getState().clearGuides);
+  clearGuidesRef.current = useCanvasStore.getState().clearGuides;
 
   useEffect(() => {
     if (isEditing && textareaRef.current) {
@@ -39,47 +65,62 @@ export default function CanvasElementRenderer({
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (isDragging) {
-        const rawDx = e.clientX - dragStart.x;
-        const rawDy = e.clientY - dragStart.y;
-        const snapResult = computeSnap(
+      const ds = dragStateRef.current;
+      if (ds.active) {
+        const rawDx = e.clientX - ds.startMouseX;
+        const rawDy = e.clientY - ds.startMouseY;
+        const rawX = ds.startElemX + rawDx;
+        const rawY = ds.startElemY + rawDy;
+
+        const store = storeRef.current;
+        const { result, newContext } = computeSnapFromPosition(
           [element],
-          elements,
-          canvasWidth,
-          canvasHeight,
-          rawDx,
-          rawDy
+          store.elements,
+          store.canvasWidth,
+          store.canvasHeight,
+          rawX,
+          rawY,
+          ds.snapCtx
         );
-        const newX = dragStart.elemX + snapResult.snappedX;
-        const newY = dragStart.elemY + snapResult.snappedY;
-        onMove(newX, newY);
-        setGuides(snapResult.guides);
+
+        ds.snapCtx = newContext;
+        onMoveRef.current(result.snappedX, result.snappedY);
+        store.setGuides(result.guides);
       }
-      if (isResizing) {
-        const dx = e.clientX - resizeStart.startX;
-        const dy = e.clientY - resizeStart.startY;
-        const newWidth = Math.max(30, resizeStart.startW + dx);
-        const newHeight = Math.max(30, resizeStart.startH + dy);
-        onResize(newWidth, newHeight);
+
+      const rs = resizeStateRef.current;
+      if (rs.active) {
+        const dx = e.clientX - rs.startMouseX;
+        const dy = e.clientY - rs.startMouseY;
+        onResizeRef.current(
+          Math.max(30, rs.startW + dx),
+          Math.max(30, rs.startH + dy)
+        );
       }
     };
 
     const handleMouseUp = () => {
-      setIsDragging(false);
-      setIsResizing(false);
-      clearGuides();
+      const ds = dragStateRef.current;
+      if (ds.active) {
+        ds.active = false;
+        ds.snapCtx = createInitialSnapContext();
+        setIsDragging(false);
+        clearGuidesRef.current();
+      }
+      const rs = resizeStateRef.current;
+      if (rs.active) {
+        rs.active = false;
+        setIsResizing(false);
+      }
     };
 
-    if (isDragging || isResizing) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-    }
-
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, isResizing, dragStart, resizeStart, onMove, onResize, element, elements, canvasWidth, canvasHeight, setGuides, clearGuides]);
+  }, [element]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
@@ -87,12 +128,13 @@ export default function CanvasElementRenderer({
     onSelect();
     if (!isEditing) {
       setIsDragging(true);
-      setDragStart({
-        x: e.clientX,
-        y: e.clientY,
-        elemX: element.x,
-        elemY: element.y,
-      });
+      const ds = dragStateRef.current;
+      ds.active = true;
+      ds.startMouseX = e.clientX;
+      ds.startMouseY = e.clientY;
+      ds.startElemX = element.x;
+      ds.startElemY = element.y;
+      ds.snapCtx = createInitialSnapContext();
     }
   };
 
@@ -100,12 +142,12 @@ export default function CanvasElementRenderer({
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
-    setResizeStart({
-      startX: e.clientX,
-      startY: e.clientY,
-      startW: element.width,
-      startH: element.height,
-    });
+    const rs = resizeStateRef.current;
+    rs.active = true;
+    rs.startMouseX = e.clientX;
+    rs.startMouseY = e.clientY;
+    rs.startW = element.width;
+    rs.startH = element.height;
   };
 
   const handleDoubleClick = () => {
@@ -157,7 +199,7 @@ export default function CanvasElementRenderer({
 
   return (
     <div
-      ref={elementRef}
+      ref={divRef}
       className={`absolute select-none ${isSelected ? 'ring-2 ring-blue-500 ring-offset-1' : ''} ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       style={{
         left: element.x,

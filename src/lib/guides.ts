@@ -1,6 +1,7 @@
 import type { CanvasElement } from '@/types';
 
 export const SNAP_THRESHOLD = 6;
+export const SNAP_LOCK_THRESHOLD = 15;
 
 export interface GuideLine {
   type: 'vertical' | 'horizontal';
@@ -27,199 +28,271 @@ export interface SnapResult {
   guides: GuideLine[];
 }
 
-export function getBoundingBox(elements: CanvasElement[]): BoundingBox {
+export interface SnapContext {
+  lockedVertical: { position: number } | null;
+  lockedHorizontal: { position: number } | null;
+}
+
+export function createInitialSnapContext(): SnapContext {
+  return { lockedVertical: null, lockedHorizontal: null };
+}
+
+export function getElementDimensions(elements: CanvasElement[]): {
+  widths: number[];
+  heights: number[];
+  minX: number;
+  minY: number;
+} {
+  const minX = Math.min(...elements.map((el) => el.x));
+  const minY = Math.min(...elements.map((el) => el.y));
+  return {
+    widths: elements.map((el) => el.width),
+    heights: elements.map((el) => el.height),
+    minX,
+    minY,
+  };
+}
+
+function buildBox(
+  elements: CanvasElement[],
+  targetX: number,
+  targetY: number
+): BoundingBox {
   if (elements.length === 0) {
     return {
-      left: 0,
-      top: 0,
-      right: 0,
-      bottom: 0,
+      left: targetX,
+      top: targetY,
+      right: targetX,
+      bottom: targetY,
       width: 0,
       height: 0,
-      centerX: 0,
-      centerY: 0,
+      centerX: targetX,
+      centerY: targetY,
     };
   }
 
-  const left = Math.min(...elements.map((el) => el.x));
-  const top = Math.min(...elements.map((el) => el.y));
-  const right = Math.max(...elements.map((el) => el.x + el.width));
-  const bottom = Math.max(...elements.map((el) => el.y + el.height));
-  const width = right - left;
-  const height = bottom - top;
+  if (elements.length === 1) {
+    const el = elements[0];
+    const left = targetX;
+    const top = targetY;
+    return {
+      left,
+      top,
+      right: left + el.width,
+      bottom: top + el.height,
+      width: el.width,
+      height: el.height,
+      centerX: left + el.width / 2,
+      centerY: top + el.height / 2,
+    };
+  }
+
+  const originalMinX = Math.min(...elements.map((el) => el.x));
+  const originalMinY = Math.min(...elements.map((el) => el.y));
+  const originalMaxX = Math.max(...elements.map((el) => el.x + el.width));
+  const originalMaxY = Math.max(...elements.map((el) => el.y + el.height));
+  const offsetX = targetX - originalMinX;
+  const offsetY = targetY - originalMinY;
 
   return {
-    left,
-    top,
-    right,
-    bottom,
-    width,
-    height,
-    centerX: left + width / 2,
-    centerY: top + height / 2,
+    left: targetX,
+    top: targetY,
+    right: originalMaxX + offsetX,
+    bottom: originalMaxY + offsetY,
+    width: originalMaxX - originalMinX,
+    height: originalMaxY - originalMinY,
+    centerX: (originalMinX + originalMaxX) / 2 + offsetX,
+    centerY: (originalMinY + originalMaxY) / 2 + offsetY,
   };
 }
 
-export function getElementBox(element: CanvasElement, offsetX = 0, offsetY = 0): BoundingBox {
-  const left = element.x + offsetX;
-  const top = element.y + offsetY;
-  const right = left + element.width;
-  const bottom = top + element.height;
-  return {
-    left,
-    top,
-    right,
-    bottom,
-    width: element.width,
-    height: element.height,
-    centerX: left + element.width / 2,
-    centerY: top + element.height / 2,
-  };
+interface RefLine {
+  position: number;
+  refMin: number;
+  refMax: number;
 }
 
-export function computeSnap(
+function collectVerticalRefs(
+  allElements: CanvasElement[],
+  draggingIds: Set<string>,
+  canvasWidth: number,
+  canvasHeight: number
+): RefLine[] {
+  const refs: RefLine[] = [
+    { position: 0, refMin: 0, refMax: canvasHeight },
+    { position: canvasWidth / 2, refMin: 0, refMax: canvasHeight },
+    { position: canvasWidth, refMin: 0, refMax: canvasHeight },
+  ];
+  for (const el of allElements) {
+    if (draggingIds.has(el.id)) continue;
+    refs.push({ position: el.x, refMin: el.y, refMax: el.y + el.height });
+    refs.push({ position: el.x + el.width / 2, refMin: el.y, refMax: el.y + el.height });
+    refs.push({ position: el.x + el.width, refMin: el.y, refMax: el.y + el.height });
+  }
+  return refs;
+}
+
+function collectHorizontalRefs(
+  allElements: CanvasElement[],
+  draggingIds: Set<string>,
+  canvasWidth: number,
+  canvasHeight: number
+): RefLine[] {
+  const refs: RefLine[] = [
+    { position: 0, refMin: 0, refMax: canvasWidth },
+    { position: canvasHeight / 2, refMin: 0, refMax: canvasWidth },
+    { position: canvasHeight, refMin: 0, refMax: canvasWidth },
+  ];
+  for (const el of allElements) {
+    if (draggingIds.has(el.id)) continue;
+    refs.push({ position: el.y, refMin: el.x, refMax: el.x + el.width });
+    refs.push({ position: el.y + el.height / 2, refMin: el.x, refMax: el.x + el.width });
+    refs.push({ position: el.y + el.height, refMin: el.x, refMax: el.x + el.width });
+  }
+  return refs;
+}
+
+function findNearestEdge(
+  boxEdges: { position: number }[],
+  targetPosition: number
+): number {
+  let best = boxEdges[0].position;
+  let bestDiff = Math.abs(best - targetPosition);
+  for (let i = 1; i < boxEdges.length; i++) {
+    const diff = Math.abs(boxEdges[i].position - targetPosition);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = boxEdges[i].position;
+    }
+  }
+  return best;
+}
+
+export function computeSnapFromPosition(
   draggingElements: CanvasElement[],
   allElements: CanvasElement[],
   canvasWidth: number,
   canvasHeight: number,
-  offsetX: number = 0,
-  offsetY: number = 0
-): SnapResult {
+  rawX: number,
+  rawY: number,
+  context: SnapContext
+): { result: SnapResult; newContext: SnapContext } {
+  const draggingIds = new Set(draggingElements.map((el) => el.id));
+  const box = buildBox(draggingElements, rawX, rawY);
+  const vRefs = collectVerticalRefs(allElements, draggingIds, canvasWidth, canvasHeight);
+  const hRefs = collectHorizontalRefs(allElements, draggingIds, canvasWidth, canvasHeight);
+
   const guides: GuideLine[] = [];
-  let finalOffsetX = offsetX;
-  let finalOffsetY = offsetY;
+  let finalX = rawX;
+  let finalY = rawY;
+  let newLockedV: { position: number } | null = null;
+  let newLockedH: { position: number } | null = null;
 
-  const draggingBox = (() => {
-    if (draggingElements.length === 1) {
-      return getElementBox(draggingElements[0], offsetX, offsetY);
-    }
-    const originalBox = getBoundingBox(draggingElements);
-    return {
-      left: originalBox.left + offsetX,
-      top: originalBox.top + offsetY,
-      right: originalBox.right + offsetX,
-      bottom: originalBox.bottom + offsetY,
-      width: originalBox.width,
-      height: originalBox.height,
-      centerX: originalBox.centerX + offsetX,
-      centerY: originalBox.centerY + offsetY,
-    };
-  })();
+  const vEdges = [
+    { position: box.left },
+    { position: box.centerX },
+    { position: box.right },
+  ];
+  const hEdges = [
+    { position: box.top },
+    { position: box.centerY },
+    { position: box.bottom },
+  ];
 
-  const otherElements = allElements.filter(
-    (el) => !draggingElements.some((de) => de.id === el.id)
-  );
-
-  const canvasLines = {
-    vertical: [0, canvasWidth / 2, canvasWidth],
-    horizontal: [0, canvasHeight / 2, canvasHeight],
-  };
-
-  const otherBoxes = otherElements.map((el) => getElementBox(el));
-
-  let bestVDiff = SNAP_THRESHOLD + 1;
-  let bestVSnap: number | null = null;
-  let bestVLine: { position: number; refMin: number; refMax: number } | null = null;
-
-  for (const cl of canvasLines.vertical) {
-    for (const [edge, dragPos] of [
-      ['left', draggingBox.left],
-      ['center', draggingBox.centerX],
-      ['right', draggingBox.right],
-    ] as const) {
-      const diff = Math.abs(dragPos - cl);
-      if (diff < bestVDiff) {
-        bestVDiff = diff;
-        const targetEdge = edge === 'left' ? draggingBox.left : edge === 'right' ? draggingBox.right : draggingBox.centerX;
-        bestVSnap = offsetX + (cl - targetEdge);
-        const refMin = Math.min(...canvasLines.horizontal);
-        const refMax = Math.max(...canvasLines.horizontal);
-        bestVLine = { position: cl, refMin, refMax };
+  // --- Vertical ---
+  if (context.lockedVertical) {
+    const lockPos = context.lockedVertical.position;
+    const nearest = findNearestEdge(vEdges, lockPos);
+    const dist = Math.abs(nearest - lockPos);
+    if (dist < SNAP_LOCK_THRESHOLD) {
+      newLockedV = { position: lockPos };
+      finalX = rawX + (lockPos - nearest);
+      const refLine = vRefs.find((r) => Math.abs(r.position - lockPos) < 0.5);
+      if (refLine) {
+        guides.push({
+          type: 'vertical',
+          position: lockPos,
+          start: Math.min(refLine.refMin, box.top),
+          end: Math.max(refLine.refMax, box.bottom),
+          color: '#f43f5e',
+        });
       }
     }
   }
 
-  for (const ob of otherBoxes) {
-    const refEdges = [ob.left, ob.centerX, ob.right];
-    const dragEdges = [draggingBox.left, draggingBox.centerX, draggingBox.right];
-    for (let i = 0; i < dragEdges.length; i++) {
-      for (let j = 0; j < refEdges.length; j++) {
-        const diff = Math.abs(dragEdges[i] - refEdges[j]);
-        if (diff < bestVDiff) {
-          bestVDiff = diff;
-          bestVSnap = offsetX + (refEdges[j] - dragEdges[i]);
-          bestVLine = { position: refEdges[j], refMin: ob.top, refMax: ob.bottom };
+  if (!newLockedV) {
+    let bestDiff = SNAP_THRESHOLD + 1;
+    let bestSnap: { position: number; refLine: RefLine; adj: number } | null = null;
+    for (const ref of vRefs) {
+      for (const edge of vEdges) {
+        const diff = Math.abs(edge.position - ref.position);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestSnap = { position: ref.position, refLine: ref, adj: ref.position - edge.position };
         }
       }
     }
+    if (bestSnap) {
+      newLockedV = { position: bestSnap.position };
+      finalX = rawX + bestSnap.adj;
+      guides.push({
+        type: 'vertical',
+        position: bestSnap.position,
+        start: Math.min(bestSnap.refLine.refMin, box.top),
+        end: Math.max(bestSnap.refLine.refMax, box.bottom),
+        color: '#f43f5e',
+      });
+    }
   }
 
-  if (bestVSnap !== null && bestVLine) {
-    finalOffsetX = bestVSnap;
-    const refMin = Math.min(bestVLine.refMin, draggingBox.top);
-    const refMax = Math.max(bestVLine.refMax, draggingBox.bottom);
-    guides.push({
-      type: 'vertical',
-      position: bestVLine.position,
-      start: refMin,
-      end: refMax,
-      color: '#f43f5e',
-    });
-  }
-
-  let bestHDiff = SNAP_THRESHOLD + 1;
-  let bestHSnap: number | null = null;
-  let bestHLine: { position: number; refMin: number; refMax: number } | null = null;
-
-  for (const cl of canvasLines.horizontal) {
-    for (const [edge, dragPos] of [
-      ['top', draggingBox.top],
-      ['center', draggingBox.centerY],
-      ['bottom', draggingBox.bottom],
-    ] as const) {
-      const diff = Math.abs(dragPos - cl);
-      if (diff < bestHDiff) {
-        bestHDiff = diff;
-        const targetEdge = edge === 'top' ? draggingBox.top : edge === 'bottom' ? draggingBox.bottom : draggingBox.centerY;
-        bestHSnap = offsetY + (cl - targetEdge);
-        const refMin = Math.min(...canvasLines.vertical);
-        const refMax = Math.max(...canvasLines.vertical);
-        bestHLine = { position: cl, refMin, refMax };
+  // --- Horizontal ---
+  if (context.lockedHorizontal) {
+    const lockPos = context.lockedHorizontal.position;
+    const nearest = findNearestEdge(hEdges, lockPos);
+    const dist = Math.abs(nearest - lockPos);
+    if (dist < SNAP_LOCK_THRESHOLD) {
+      newLockedH = { position: lockPos };
+      finalY = rawY + (lockPos - nearest);
+      const refLine = hRefs.find((r) => Math.abs(r.position - lockPos) < 0.5);
+      if (refLine) {
+        guides.push({
+          type: 'horizontal',
+          position: lockPos,
+          start: Math.min(refLine.refMin, box.left),
+          end: Math.max(refLine.refMax, box.right),
+          color: '#f43f5e',
+        });
       }
     }
   }
 
-  for (const ob of otherBoxes) {
-    const refEdges = [ob.top, ob.centerY, ob.bottom];
-    const dragEdges = [draggingBox.top, draggingBox.centerY, draggingBox.bottom];
-    for (let i = 0; i < dragEdges.length; i++) {
-      for (let j = 0; j < refEdges.length; j++) {
-        const diff = Math.abs(dragEdges[i] - refEdges[j]);
-        if (diff < bestHDiff) {
-          bestHDiff = diff;
-          bestHSnap = offsetY + (refEdges[j] - dragEdges[i]);
-          bestHLine = { position: refEdges[j], refMin: ob.left, refMax: ob.right };
+  if (!newLockedH) {
+    let bestDiff = SNAP_THRESHOLD + 1;
+    let bestSnap: { position: number; refLine: RefLine; adj: number } | null = null;
+    for (const ref of hRefs) {
+      for (const edge of hEdges) {
+        const diff = Math.abs(edge.position - ref.position);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestSnap = { position: ref.position, refLine: ref, adj: ref.position - edge.position };
         }
       }
     }
-  }
-
-  if (bestHSnap !== null && bestHLine) {
-    finalOffsetY = bestHSnap;
-    const refMin = Math.min(bestHLine.refMin, draggingBox.left);
-    const refMax = Math.max(bestHLine.refMax, draggingBox.right);
-    guides.push({
-      type: 'horizontal',
-      position: bestHLine.position,
-      start: refMin,
-      end: refMax,
-      color: '#f43f5e',
-    });
+    if (bestSnap) {
+      newLockedH = { position: bestSnap.position };
+      finalY = rawY + bestSnap.adj;
+      guides.push({
+        type: 'horizontal',
+        position: bestSnap.position,
+        start: Math.min(bestSnap.refLine.refMin, box.left),
+        end: Math.max(bestSnap.refLine.refMax, box.right),
+        color: '#f43f5e',
+      });
+    }
   }
 
   return {
-    snappedX: finalOffsetX,
-    snappedY: finalOffsetY,
-    guides,
+    result: { snappedX: finalX, snappedY: finalY, guides },
+    newContext: { lockedVertical: newLockedV, lockedHorizontal: newLockedH },
   };
 }
